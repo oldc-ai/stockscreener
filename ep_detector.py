@@ -17,12 +17,16 @@ import time
 import warnings
 from typing import List, Dict, Tuple, Optional
 import os
+from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 warnings.filterwarnings('ignore')
+
+# Load environment variables from .env file
+load_dotenv()
 
 class EPDetector:
     def __init__(self, api_key: str = None, secret_key: str = None):
@@ -35,17 +39,14 @@ class EPDetector:
         self.secret_key = secret_key or os.getenv('ALPACA_SECRET_KEY')
         
         if not self.api_key or not self.secret_key:
-            print("Warning: Alpaca credentials not found. Using paper trading endpoint.")
-            print("Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables")
-            print("Or pass them to EPDetector(api_key='...', secret_key='...')")
+            print("Warning: Alpaca credentials not found in environment variables.")
+            print("Please create a .env file with your credentials:")
+            print("ALPACA_API_KEY=your_api_key_here")
+            print("ALPACA_SECRET_KEY=your_secret_key_here")
+            raise ValueError("Alpaca credentials are required. Please set them in .env file or pass them to the constructor.")
         
-        # Initialize Alpaca client (works without credentials for market data)
-        try:
-            self.client = StockHistoricalDataClient(self.api_key, self.secret_key)
-        except:
-            # Fallback to no-auth client for basic market data
-            self.client = StockHistoricalDataClient()
-        
+        # Initialize Alpaca client
+        self.client = StockHistoricalDataClient(self.api_key, self.secret_key)
         self.results = []
         self.failed_tickers = []
         
@@ -61,9 +62,93 @@ class EPDetector:
             return []
     
     def get_stock_data(self, ticker: str, days: int = 365) -> Optional[pd.DataFrame]:
-        """Get stock data for a single ticker using Alpaca"""
-        batch_data = self.get_batch_stock_data([ticker], days)
-        return batch_data.get(ticker) if batch_data else None
+        """Get stock data for a single ticker using Alpaca, including pre/post market data"""
+        try:
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            # Get regular market hours data
+            request_params = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=TimeFrame.Day,
+                start=start_date,
+                end=end_date,
+                adjustment='raw'
+            )
+            
+            bars = self.client.get_stock_bars(request_params)
+            
+            if bars.df.empty:
+                return None
+                
+            # Get pre/post market data for the last day
+            extended_hours_params = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=TimeFrame.Minute,
+                start=end_date - timedelta(days=1),
+                end=end_date,
+                adjustment='raw'
+            )
+            
+            extended_bars = self.client.get_stock_bars(extended_hours_params)
+            
+            # Process regular market data
+            df = bars.df.reset_index()
+            df = df.rename(columns={
+                'open': 'Open',
+                'high': 'High', 
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume'
+            })
+            df['Date'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('Date')
+            df = df.drop(['timestamp', 'symbol'], axis=1, errors='ignore')
+            
+            # Process extended hours data if available
+            pre_market_data = None
+            post_market_data = None
+            
+            if not extended_bars.df.empty:
+                ext_df = extended_bars.df.reset_index()
+                ext_df['Date'] = pd.to_datetime(ext_df['timestamp'])
+                
+                # Filter pre-market (4:00 AM - 9:30 AM EST)
+                pre_market = ext_df[
+                    (ext_df['Date'].dt.hour >= 4) & 
+                    (ext_df['Date'].dt.hour < 9) |
+                    ((ext_df['Date'].dt.hour == 9) & (ext_df['Date'].dt.minute < 30))
+                ]
+                
+                # Filter post-market (4:00 PM - 8:00 PM EST)
+                post_market = ext_df[
+                    (ext_df['Date'].dt.hour >= 16) & 
+                    (ext_df['Date'].dt.hour < 20)
+                ]
+                
+                if not pre_market.empty:
+                    pre_market_data = pd.DataFrame({
+                        'Open': [pre_market['open'].iloc[0]],
+                        'High': [pre_market['high'].max()],
+                        'Low': [pre_market['low'].min()],
+                        'Close': [pre_market['close'].iloc[-1]],
+                        'Volume': [pre_market['volume'].sum()]
+                    })
+                
+                if not post_market.empty:
+                    post_market_data = pd.DataFrame({
+                        'Open': [post_market['open'].iloc[0]],
+                        'High': [post_market['high'].max()],
+                        'Low': [post_market['low'].min()],
+                        'Close': [post_market['close'].iloc[-1]],
+                        'Volume': [post_market['volume'].sum()]
+                    })
+            
+            return df, pre_market_data, post_market_data
+                
+        except Exception as e:
+            print(f"Error fetching data for {ticker}: {e}")
+            return None
     
     def get_batch_stock_data(self, tickers: List[str], days: int = 365) -> Dict[str, pd.DataFrame]:
         """Get stock data for multiple tickers in a single API call"""
@@ -235,22 +320,45 @@ class EPDetector:
         
         return None
     
-    def calculate_gap_up(self, data: pd.DataFrame) -> float:
-        """Calculate gap up percentage from previous close to current open"""
+    def calculate_gap_up(self, data: pd.DataFrame, pre_market_data: Optional[pd.DataFrame] = None, post_market_data: Optional[pd.DataFrame] = None) -> float:
+        """
+        Calculate gap up percentage considering pre/post market data
+        
+        Args:
+            data: Regular market hours data
+            pre_market_data: Pre-market data (4:00 AM - 9:30 AM EST)
+            post_market_data: Post-market data (4:00 PM - 8:00 PM EST)
+        """
         if len(data) < 2:
             return 0.0
         
-        current_open = data['Open'].iloc[-1]
         previous_close = data['Close'].iloc[-2]
-        current_close = data['Close'].iloc[-1]
-        if current_close < current_open:
-            return 0.0
-        
         if previous_close == 0:
             return 0.0
             
-        gap_percent = ((current_open - previous_close) / previous_close) * 100
-        return gap_percent
+        # Check pre-market gap
+        if pre_market_data is not None and not pre_market_data.empty:
+            pre_market_price = pre_market_data['Close'].iloc[-1]
+            pre_market_gap = ((pre_market_price - previous_close) / previous_close) * 100
+            if pre_market_gap >= 10.0:  # If pre-market gap is significant
+                return pre_market_gap
+        
+        # Check regular market gap
+        current_open = data['Open'].iloc[-1]
+        current_close = data['Close'].iloc[-1]
+        if current_close < current_open:
+            return 0.0
+            
+        regular_gap = ((current_open - previous_close) / previous_close) * 100
+        
+        # Check post-market gap
+        if post_market_data is not None and not post_market_data.empty:
+            post_market_price = post_market_data['Close'].iloc[-1]
+            post_market_gap = ((post_market_price - current_close) / current_close) * 100
+            if post_market_gap >= 10.0:  # If post-market gap is significant
+                return post_market_gap
+        
+        return regular_gap
     
     def calculate_volume_surge(self, data: pd.DataFrame, lookback_days: int = 20) -> float:
         """Calculate volume surge as multiple of average volume"""
@@ -347,19 +455,23 @@ class EPDetector:
     
     def screen_for_ep(self, ticker: str) -> Optional[Dict]:
         """Screen a single ticker for EP setup - Technical analysis only"""
-        data = self.get_stock_data(ticker)
+        data_result = self.get_stock_data(ticker)
+        if data_result is None:
+            return None
+            
+        data, pre_market_data, post_market_data = data_result
         if data is None or len(data) < 30:
             return None
         
         # Calculate key technical metrics
-        gap_percent = self.calculate_gap_up(data)
+        gap_percent = self.calculate_gap_up(data, pre_market_data, post_market_data)
         volume_surge = self.calculate_volume_surge(data)
         sideways_info = self.check_sideways_consolidation(data)
         price_strength = self.calculate_price_strength(data)
         volatility_metrics = self.calculate_volatility_metrics(data)
         
-        # Current price info
-        current_price = data['Close'].iloc[-1]
+        # Current price info - use post-market price if available
+        current_price = post_market_data['Close'].iloc[-1] if post_market_data is not None else data['Close'].iloc[-1]
         current_volume = data['Volume'].iloc[-1]
         avg_volume_20d = data['Volume'].iloc[-21:-1].mean() if len(data) > 20 else 0
         
