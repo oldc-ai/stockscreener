@@ -17,19 +17,27 @@ import time
 import warnings
 from typing import List, Dict, Tuple, Optional
 import os
+import argparse
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+import yfinance as yf
 
 warnings.filterwarnings('ignore')
 
 # Load environment variables from .env file
 load_dotenv()
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='EP Detector with industry and market cap filtering')
+    parser.add_argument('--exclude-industry', nargs='+', help='List of industries to exclude (e.g., "Technology" "Healthcare")')
+    parser.add_argument('--exclude-market-cap-below', type=float, help='Exclude stocks with market cap below this value (in millions)')
+    return parser.parse_args()
+
 class EPDetector:
-    def __init__(self, api_key: str = None, secret_key: str = None):
+    def __init__(self, api_key: str = None, secret_key: str = None, exclude_industries: List[str] = None, min_market_cap: float = None):
         """
         Initialize EP Detector with Alpaca credentials
         If no credentials provided, will look for environment variables
@@ -50,6 +58,37 @@ class EPDetector:
         self.results = []
         self.failed_tickers = []
         
+        # Store filtering parameters
+        self.exclude_industries = [ind.lower() for ind in (exclude_industries or [])]
+        self.min_market_cap = min_market_cap  # in millions
+
+    def check_fundamentals(self, ticker: str) -> Tuple[bool, str]:
+        """
+        Check if stock meets fundamental criteria (industry and market cap)
+        Returns: (meets_criteria, reason)
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # Check industry
+            if self.exclude_industries and 'industry' in info:
+                industry = info['industry'].lower()
+                if any(excluded.lower() in industry for excluded in self.exclude_industries):
+                    return False, f"Industry {industry} is excluded"
+            
+            # Check market cap
+            if self.min_market_cap and 'marketCap' in info:
+                market_cap_millions = info['marketCap'] / 1_000_000  # Convert to millions
+                if market_cap_millions < self.min_market_cap:
+                    return False, f"Market cap {market_cap_millions:.2f}M below threshold {self.min_market_cap}M"
+            
+            return True, "Meets fundamental criteria"
+            
+        except Exception as e:
+            print(f"Error checking fundamentals for {ticker}: {e}")
+            return True, "Error checking fundamentals, proceeding with technical analysis"
+
     def load_tickers(self, filename: str = 'all_tickers.txt') -> List[str]:
         """Load ticker symbols from file"""
         try:
@@ -288,6 +327,11 @@ class EPDetector:
         min_score_threshold = 30  # At least gap (30) + some additional criteria
         
         if ep_score >= min_score_threshold:
+            # Only check fundamentals if it's a valid EP setup
+            meets_fundamentals, fundamental_reason = self.check_fundamentals(ticker)
+            if not meets_fundamentals:
+                return None
+                
             return {
                 "ticker": ticker,
                 "ep_score": ep_score,
@@ -666,31 +710,34 @@ class EPDetector:
             print(f"  {row['ticker']:6} - Score: {row['ep_score']:3.0f} - Gap: {row['gap_percent']:5.1f}% - Vol: {row['volume_surge']:4.1f}x - ${row['current_price']:6.2f}")
 
 def main():
-    """Main function to run the EP scanner"""
-    print("=== EPISODIC PIVOT DETECTOR ===")
-    print("Technical Analysis Focus - Using Alpaca Data")
-    print("Based on Qullamaggie's methodology\n")
+    """Main function to run the EP detector"""
+    args = parse_args()
     
-    # Initialize detector
-    detector = EPDetector()
+    # Initialize EP detector with filtering options
+    detector = EPDetector(
+        exclude_industries=args.exclude_industry,
+        min_market_cap=args.exclude_market_cap_below
+    )
     
-    results = detector.scan_all_tickers(max_tickers=None)
+    # Load tickers and scan
+    tickers = detector.load_tickers()
+    if not tickers:
+        print("No tickers loaded. Exiting.")
+        return
+    
+    print(f"Starting EP scan with {len(tickers)} tickers...")
+    if args.exclude_industry:
+        print(f"Excluding industries: {', '.join(args.exclude_industry)}")
+    if args.exclude_market_cap_below:
+        print(f"Excluding stocks with market cap below ${args.exclude_market_cap_below}M")
+    
+    results = detector.scan_all_tickers()
     
     if results:
+        print(f"\nFound {len(results)} potential EP setups!")
         detector.save_results(results)
-        
-        print(f"\n=== TOP EP CANDIDATES ===")
-        for i, result in enumerate(sorted(results, key=lambda x: x['ep_score'], reverse=True)[:10]):
-            print(f"\n{i+1}. {result['ticker']}")
-            print(f"   Score: {result['ep_score']}/100")
-            print(f"   Gap: {result['gap_percent']:.1f}% | Volume: {result['volume_surge']:.1f}x avg")
-            print(f"   Price: ${result['current_price']:.2f} | RSI: {result['rsi']:.1f}")
-            print(f"   1D: {result['price_1d']:+.1f}% | 5D: {result['price_5d']:+.1f}%")
-            print(f"   Consolidation: {result['sideways_consolidation']['consolidation_days']} days, {result['sideways_consolidation']['range_percent']:.1f}% range")
-            print(f"   Criteria: {', '.join(result['criteria_met'])}")
     else:
-        print("No Episodic Pivot setups found in the current scan.")
-        print("Try scanning during market hours or after significant news events.")
+        print("\nNo EP setups found.")
 
 if __name__ == "__main__":
     main()
