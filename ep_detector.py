@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+import argparse
 
 warnings.filterwarnings('ignore')
 
@@ -198,7 +199,7 @@ class EPDetector:
             print(f"Error fetching batch data: {e}")
             return {}
     
-    def process_batch(self, batch_tickers: List[str]) -> List[Dict]:
+    def process_batch(self, batch_tickers: List[str], require_sideways: bool = True) -> List[Dict]:
         """Process a batch of tickers for EP setups"""
         results = []
         
@@ -209,7 +210,7 @@ class EPDetector:
             try:
                 data = batch_data.get(ticker)
                 if data is not None and len(data) >= 30:
-                    result = self.screen_for_ep_with_data(ticker, data)
+                    result = self.screen_for_ep_with_data(ticker, data, require_sideways=require_sideways)
                     if result:
                         results.append(result)
             except Exception as e:
@@ -218,8 +219,122 @@ class EPDetector:
         
         return results
     
-    def screen_for_ep_with_data(self, ticker: str, data: pd.DataFrame) -> Optional[Dict]:
-        """Screen a single ticker for EP setup with pre-loaded data"""
+    def screen_for_ep(self, ticker: str, require_sideways: bool = True) -> Optional[Dict]:
+        """Screen a single ticker for EP setup - Technical analysis only"""
+        data_result = self.get_stock_data(ticker)
+        if data_result is None:
+            return None
+            
+        data, pre_market_data, post_market_data = data_result
+        if data is None or len(data) < 30:
+            return None
+        
+        # Calculate key technical metrics
+        gap_percent = self.calculate_gap_up(data, pre_market_data, post_market_data)
+        volume_surge = self.calculate_volume_surge(data)
+        sideways_info = self.check_sideways_consolidation(data)
+        price_strength = self.calculate_price_strength(data)
+        volatility_metrics = self.calculate_volatility_metrics(data)
+        
+        # Current price info - use post-market price if available
+        current_price = post_market_data['Close'].iloc[-1] if post_market_data is not None else data['Close'].iloc[-1]
+        current_volume = data['Volume'].iloc[-1]
+        avg_volume_20d = data['Volume'].iloc[-21:-1].mean() if len(data) > 20 else 0
+        
+        # Filter out penny stocks (price < $1)
+        if current_price < 1.0:
+            return None
+        
+        # Price change metrics
+        price_1d = ((current_price - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100 if len(data) > 1 else 0
+        price_5d = ((current_price - data['Close'].iloc[-6]) / data['Close'].iloc[-6]) * 100 if len(data) > 5 else 0
+        
+        # HARD REQUIREMENT: EP must have 10%+ gap up (Qullamaggie's definition)
+        if gap_percent < 10.0:
+            return None
+        
+        # Optionally enforce sideways check
+        if require_sideways and (not sideways_info["is_sideways"] or sideways_info["consolidation_days"] < 60):
+            return None
+        
+        # EP Technical Scoring System (100 points max)
+        ep_score = 0
+        criteria_met = []
+        
+        # 1. Gap up criteria (most important - 40 points max)
+        # Note: All candidates already have 10%+ gap due to hard requirement above
+        if gap_percent >= 15:
+            ep_score += 40
+            criteria_met.append(f"Big gap: {gap_percent:.1f}%")
+        elif gap_percent >= 10:
+            ep_score += 30
+            criteria_met.append(f"Gap up: {gap_percent:.1f}%")
+        
+        # 2. Volume surge criteria (30 points max)
+        if volume_surge >= 5:
+            ep_score += 30
+            criteria_met.append(f"Huge volume: {volume_surge:.1f}x")
+        elif volume_surge >= 3:
+            ep_score += 25
+            criteria_met.append(f"Volume surge: {volume_surge:.1f}x")
+        elif volume_surge >= 2:
+            ep_score += 10
+            criteria_met.append(f"Good volume: {volume_surge:.1f}x")
+        
+        # 3. Sideways consolidation (20 points max)
+        if sideways_info["is_sideways"] and sideways_info["consolidation_days"] >= 60:
+            ep_score += 20
+            criteria_met.append(f"Sideways {sideways_info['consolidation_days']} days")
+        elif sideways_info["consolidation_days"] >= 30:
+            ep_score += 10
+            criteria_met.append(f"Some consolidation")
+        
+        # 4. Price strength (10 points max)
+        if price_strength["recent_high"]:
+            ep_score += 5
+            criteria_met.append("New highs")
+        if price_strength["price_above_50ma"]:
+            ep_score += 5
+            criteria_met.append("Above 50MA")
+        
+        # Since we already require 10%+ gap, lower the minimum score threshold
+        min_score_threshold = 30  # At least gap (30) + some additional criteria
+        
+        if ep_score >= min_score_threshold:
+            return {
+                "ticker": ticker,
+                "ep_score": ep_score,
+                
+                # Price metrics
+                "current_price": current_price,
+                "gap_percent": gap_percent,
+                "price_1d": price_1d,
+                "price_5d": price_5d,
+                
+                # Volume metrics  
+                "volume_surge": volume_surge,
+                "current_volume": current_volume,
+                "avg_volume_20d": avg_volume_20d,
+                
+                # Technical indicators
+                "rsi": price_strength["rsi"],
+                "above_50ma": price_strength["price_above_50ma"],
+                "recent_high": price_strength["recent_high"],
+                "atr": volatility_metrics["atr"],
+                "volatility": volatility_metrics["volatility"],
+                
+                # Consolidation analysis
+                "sideways_consolidation": sideways_info,
+                
+                # Summary
+                "criteria_met": criteria_met,
+                "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        
+        return None
+    
+    def screen_for_ep_with_data(self, ticker: str, data: pd.DataFrame, require_sideways: bool = True) -> Optional[Dict]:
+        """Screen a single ticker for EP setup with pre-loaded data, with optional sideways check"""
         # Calculate key technical metrics
         gap_percent = self.calculate_gap_up(data)
         volume_surge = self.calculate_volume_surge(data)
@@ -242,6 +357,10 @@ class EPDetector:
         
         # HARD REQUIREMENT: EP must have 10%+ gap up (Qullamaggie's definition)
         if gap_percent < 10.0:
+            return None
+        
+        # Optionally enforce sideways check
+        if require_sideways and (not sideways_info["is_sideways"] or sideways_info["consolidation_days"] < 60):
             return None
         
         # EP Technical Scoring System (100 points max)
@@ -375,7 +494,10 @@ class EPDetector:
         return volume_multiple
     
     def check_sideways_consolidation(self, data: pd.DataFrame, lookback_days: int = 120) -> Dict:
-        """Check if stock has been consolidating sideways for 3-6+ months"""
+        """
+        Check if stock has been consolidating sideways for 3-6+ months
+        Modified to better identify stocks that haven't had their run yet
+        """
         if len(data) < lookback_days:
             return {"is_sideways": False, "consolidation_days": 0, "range_percent": 0}
         
@@ -385,17 +507,48 @@ class EPDetector:
         if len(consolidation_data) < 60:  # Need at least 60 days for meaningful analysis
             return {"is_sideways": False, "consolidation_days": 0, "range_percent": 0}
         
+        # Calculate key price levels
         high = consolidation_data['High'].max()
         low = consolidation_data['Low'].min()
         range_percent = ((high - low) / low) * 100
         
-        # Consider sideways if trading range is less than 40% over the period
-        is_sideways = range_percent < 40
+        # Calculate moving averages
+        consolidation_data['SMA_20'] = consolidation_data['Close'].rolling(20).mean()
+        consolidation_data['SMA_50'] = consolidation_data['Close'].rolling(50).mean()
+        
+        # Check if price has been relatively flat (not trending up or down)
+        price_trend = (consolidation_data['Close'].iloc[-1] - consolidation_data['Close'].iloc[0]) / consolidation_data['Close'].iloc[0] * 100
+        
+        # Check if price has been above 50MA for most of the period
+        above_50ma_percent = (consolidation_data['Close'] > consolidation_data['SMA_50']).mean() * 100
+        
+        # Check if there were any significant runs up (>30% in 20 days)
+        significant_runs = False
+        for i in range(len(consolidation_data) - 20):
+            run_percent = (consolidation_data['Close'].iloc[i+20] - consolidation_data['Close'].iloc[i]) / consolidation_data['Close'].iloc[i] * 100
+            if run_percent > 30:
+                significant_runs = True
+                break
+        
+        # New sideways criteria:
+        # 1. Price range less than 100% (increased to handle more volatile stocks)
+        # 2. Not in a strong uptrend (>30% over the period)
+        # 3. No significant runs up (>40% in 20 days)
+        # 4. Price has been relatively stable (either around 50MA or below it)
+        is_sideways = (
+            range_percent < 100 and  # Much wider range allowed
+            price_trend < 30 and     # Not in strong uptrend
+            not significant_runs and  # No big runs up
+            (above_50ma_percent > 30 or above_50ma_percent < 20)  # Either above or below 50MA, but not crossing it much
+        )
         
         return {
             "is_sideways": is_sideways,
             "consolidation_days": len(consolidation_data),
             "range_percent": range_percent,
+            "price_trend": price_trend,
+            "above_50ma_percent": above_50ma_percent,
+            "significant_runs": significant_runs,
             "consolidation_high": high,
             "consolidation_low": low
         }
@@ -453,118 +606,8 @@ class EPDetector:
             "volatility": volatility if not pd.isna(volatility) else 0
         }
     
-    def screen_for_ep(self, ticker: str) -> Optional[Dict]:
-        """Screen a single ticker for EP setup - Technical analysis only"""
-        data_result = self.get_stock_data(ticker)
-        if data_result is None:
-            return None
-            
-        data, pre_market_data, post_market_data = data_result
-        if data is None or len(data) < 30:
-            return None
-        
-        # Calculate key technical metrics
-        gap_percent = self.calculate_gap_up(data, pre_market_data, post_market_data)
-        volume_surge = self.calculate_volume_surge(data)
-        sideways_info = self.check_sideways_consolidation(data)
-        price_strength = self.calculate_price_strength(data)
-        volatility_metrics = self.calculate_volatility_metrics(data)
-        
-        # Current price info - use post-market price if available
-        current_price = post_market_data['Close'].iloc[-1] if post_market_data is not None else data['Close'].iloc[-1]
-        current_volume = data['Volume'].iloc[-1]
-        avg_volume_20d = data['Volume'].iloc[-21:-1].mean() if len(data) > 20 else 0
-        
-        # Filter out penny stocks (price < $1)
-        if current_price < 1.0:
-            return None
-        
-        # Price change metrics
-        price_1d = ((current_price - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100 if len(data) > 1 else 0
-        price_5d = ((current_price - data['Close'].iloc[-6]) / data['Close'].iloc[-6]) * 100 if len(data) > 5 else 0
-        
-        # HARD REQUIREMENT: EP must have 10%+ gap up (Qullamaggie's definition)
-        if gap_percent < 10.0:
-            return None
-        
-        # EP Technical Scoring System (100 points max)
-        ep_score = 0
-        criteria_met = []
-        
-        # 1. Gap up criteria (most important - 40 points max)
-        # Note: All candidates already have 10%+ gap due to hard requirement above
-        if gap_percent >= 15:
-            ep_score += 40
-            criteria_met.append(f"Big gap: {gap_percent:.1f}%")
-        elif gap_percent >= 10:
-            ep_score += 30
-            criteria_met.append(f"Gap up: {gap_percent:.1f}%")
-        
-        # 2. Volume surge criteria (30 points max)
-        if volume_surge >= 5:
-            ep_score += 30
-            criteria_met.append(f"Huge volume: {volume_surge:.1f}x")
-        elif volume_surge >= 3:
-            ep_score += 25
-            criteria_met.append(f"Volume surge: {volume_surge:.1f}x")
-        elif volume_surge >= 2:
-            ep_score += 10
-            criteria_met.append(f"Good volume: {volume_surge:.1f}x")
-        
-        # 3. Sideways consolidation (20 points max)
-        if sideways_info["is_sideways"] and sideways_info["consolidation_days"] >= 60:
-            ep_score += 20
-            criteria_met.append(f"Sideways {sideways_info['consolidation_days']} days")
-        elif sideways_info["consolidation_days"] >= 30:
-            ep_score += 10
-            criteria_met.append(f"Some consolidation")
-        
-        # 4. Price strength (10 points max)
-        if price_strength["recent_high"]:
-            ep_score += 5
-            criteria_met.append("New highs")
-        if price_strength["price_above_50ma"]:
-            ep_score += 5
-            criteria_met.append("Above 50MA")
-        
-        # Since we already require 10%+ gap, lower the minimum score threshold
-        min_score_threshold = 30  # At least gap (30) + some additional criteria
-        
-        if ep_score >= min_score_threshold:
-            return {
-                "ticker": ticker,
-                "ep_score": ep_score,
-                
-                # Price metrics
-                "current_price": current_price,
-                "gap_percent": gap_percent,
-                "price_1d": price_1d,
-                "price_5d": price_5d,
-                
-                # Volume metrics  
-                "volume_surge": volume_surge,
-                "current_volume": current_volume,
-                "avg_volume_20d": avg_volume_20d,
-                
-                # Technical indicators
-                "rsi": price_strength["rsi"],
-                "above_50ma": price_strength["price_above_50ma"],
-                "recent_high": price_strength["recent_high"],
-                "atr": volatility_metrics["atr"],
-                "volatility": volatility_metrics["volatility"],
-                
-                # Consolidation analysis
-                "sideways_consolidation": sideways_info,
-                
-                # Summary
-                "criteria_met": criteria_met,
-                "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-        
-        return None
-    
     def scan_all_tickers(self, ticker_file: str = 'all_tickers.txt', max_tickers: Optional[int] = None, 
-                        batch_size: int = 20, max_workers: int = 4) -> List[Dict]:
+                        batch_size: int = 20, max_workers: int = 4, require_sideways: bool = True) -> List[Dict]:
         """Scan all tickers for EP setups using batching and parallel processing"""
         tickers = self.load_tickers(ticker_file)
         
@@ -574,7 +617,8 @@ class EPDetector:
         
         print(f"Scanning {len(tickers)} tickers for Episodic Pivot setups (Technical Analysis)...")
         print(f"Using batched processing: {batch_size} tickers per batch, {max_workers} parallel workers")
-        print("Alpaca data source with 10%+ gap requirement enforced\n")
+        print("Alpaca data source with 10%+ gap requirement enforced")
+        print(f"Sideways consolidation requirement: {'Enabled' if require_sideways else 'Disabled'}\n")
         
         # Split tickers into batches
         batches = [tickers[i:i + batch_size] for i in range(0, len(tickers), batch_size)]
@@ -584,7 +628,7 @@ class EPDetector:
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all batches
-            future_to_batch = {executor.submit(self.process_batch, batch): batch for batch in batches}
+            future_to_batch = {executor.submit(self.process_batch, batch, require_sideways): batch for batch in batches}
             
             for future in as_completed(future_to_batch):
                 batch = future_to_batch[future]
@@ -671,10 +715,17 @@ def main():
     print("Technical Analysis Focus - Using Alpaca Data")
     print("Based on Qullamaggie's methodology\n")
     
+    # Add command line argument parsing
+    parser = argparse.ArgumentParser(description="EP Detector Scanner")
+    parser.add_argument("--no-sideways", action="store_true", help="Disable sideways consolidation requirement")
+    parser.add_argument("--max-tickers", type=int, help="Maximum number of tickers to scan")
+    args = parser.parse_args()
+    
     # Initialize detector
     detector = EPDetector()
     
-    results = detector.scan_all_tickers(max_tickers=None)
+    # Run scan with sideways flag
+    results = detector.scan_all_tickers(max_tickers=args.max_tickers, require_sideways=not args.no_sideways)
     
     if results:
         detector.save_results(results)

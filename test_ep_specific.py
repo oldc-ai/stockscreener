@@ -4,60 +4,137 @@ Quick test of EP detector with specific popular tickers
 """
 
 from ep_detector import EPDetector
+import pandas as pd
+import traceback
+import argparse
 
-def test_specific_tickers():
-    """Test EP detector with specific well-known tickers"""
-    
-    # Popular tickers that might have EP patterns
-    test_tickers = [
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX',
-        'AMD', 'COIN', 'PLTR', 'SOFI', 'RBLX', 'HOOD', 'RIVN', 'LCID',
-        'SNOW', 'CRWD', 'ZM', 'SHOP', 'SQ', 'ROKU', 'UBER', 'LYFT',
-        'TDOC', 'PTON', 'BYND', 'SPCE', 'GME', 'AMC', 'BB', 'NOK'
-    ]
-    
-    print("=== EP DETECTOR TEST - SPECIFIC TICKERS ===")
-    print(f"Testing {len(test_tickers)} popular tickers for EP setups...\n")
-    
-    detector = EPDetector()
-    results = []
-    
-    for i, ticker in enumerate(test_tickers):
-        print(f"Testing {i+1:2}/{len(test_tickers)}: {ticker:6}", end=" ")
+def analyze_ticker(ticker: str, require_sideways: bool = True):
+    print(f"\nAnalyzing {ticker} for EP setup... (sideways required: {require_sideways})")
+    try:
+        detector = EPDetector()
         
-        try:
-            result = detector.screen_for_ep(ticker)
-            if result:
-                results.append(result)
-                print(f"✓ EP! Score: {result['ep_score']:2.0f} | Gap: {result['gap_percent']:5.1f}% | Vol: {result['volume_surge']:4.1f}x")
-            else:
-                print("-")
-        except Exception as e:
-            print(f"✗ Error: {str(e)[:30]}")
-    
-    print(f"\n=== RESULTS ===")
-    if results:
-        print(f"Found {len(results)} EP candidates:")
+        # Get data
+        print("Fetching data...")
+        data_result = detector.get_stock_data(ticker)
+        if data_result is None:
+            print(f"Could not get data for {ticker}")
+            return
+            
+        data, pre_market_data, post_market_data = data_result
+        print(f"Got {len(data)} days of data")
         
-        # Sort by score
-        results.sort(key=lambda x: x['ep_score'], reverse=True)
+        # Calculate all metrics
+        print("Calculating metrics...")
+        gap_percent = detector.calculate_gap_up(data, pre_market_data, post_market_data)
+        volume_surge = detector.calculate_volume_surge(data)
+        sideways_info = detector.check_sideways_consolidation(data)
+        price_strength = detector.calculate_price_strength(data)
+        volatility_metrics = detector.calculate_volatility_metrics(data)
         
-        for i, result in enumerate(results):
-            print(f"\n{i+1}. {result['ticker']}")
-            print(f"   Score: {result['ep_score']}/100")
-            print(f"   Gap: {result['gap_percent']:.1f}% | Volume: {result['volume_surge']:.1f}x")
-            print(f"   Price: ${result['current_price']:.2f} | RSI: {result['rsi']:.1f}")
-            print(f"   1D: {result['price_1d']:+.1f}% | 5D: {result['price_5d']:+.1f}%")
-            print(f"   Consolidation: {result['sideways_consolidation']['consolidation_days']} days")
-            print(f"   Criteria: {', '.join(result['criteria_met'])}")
+        # Print detailed analysis
+        print("\nDetailed Analysis:")
+        print(f"1. Gap Analysis:")
+        print(f"   - Gap Percentage: {gap_percent:.2f}%")
+        if pre_market_data is not None:
+            print(f"   - Pre-market data available")
+        if post_market_data is not None:
+            print(f"   - Post-market data available")
         
-        # Save results
-        detector.save_results(results, 'ep_test_specific_results.csv')
+        print(f"\n2. Volume Analysis:")
+        print(f"   - Volume Surge: {volume_surge:.2f}x average")
+        print(f"   - Current Volume: {data['Volume'].iloc[-1]:,.0f}")
+        print(f"   - 20-day Avg Volume: {data['Volume'].iloc[-21:-1].mean():,.0f}")
         
-    else:
-        print("No EP setups found in these specific tickers.")
-        print("This is normal - EPs are rare and typically occur around earnings or major news.")
-        print("Try running during earnings season or after market-moving events.")
+        print(f"\n3. Price Analysis:")
+        print(f"   - Current Price: ${data['Close'].iloc[-1]:.2f}")
+        print(f"   - RSI: {price_strength['rsi']:.1f}")
+        print(f"   - Above 50MA: {price_strength['price_above_50ma']}")
+        print(f"   - Recent High: {price_strength['recent_high']}")
+        
+        print(f"\n4. Consolidation Analysis:")
+        print(f"   - Sideways: {sideways_info['is_sideways']}")
+        print(f"   - Consolidation Days: {sideways_info['consolidation_days']}")
+        print(f"   - Range Percent: {sideways_info['range_percent']:.1f}%")
+        print(f"   - Price Trend: {sideways_info['price_trend']:.1f}%")
+        print(f"   - Above 50MA: {sideways_info['above_50ma_percent']:.1f}%")
+        print(f"   - Significant Runs: {sideways_info['significant_runs']}")
+        
+        print(f"\n5. Volatility Metrics:")
+        print(f"   - ATR: {volatility_metrics['atr']:.2f}")
+        print(f"   - Volatility: {volatility_metrics['volatility']:.1f}%")
+        
+        # Check if it meets EP criteria
+        print("\nEP Criteria Check:")
+        print(f"1. Gap up 10%+: {'✓' if gap_percent >= 10.0 else '✗'} ({gap_percent:.1f}%)")
+        print(f"2. Volume surge 3x+: {'✓' if volume_surge >= 3.0 else '✗'} ({volume_surge:.1f}x)")
+        print(f"3. Sideways 3-6+ months: {'✓' if sideways_info['is_sideways'] and sideways_info['consolidation_days'] >= 60 else '✗'} ({sideways_info['consolidation_days']} days)")
+        print(f"4. Price strength: {'✓' if price_strength['recent_high'] or price_strength['price_above_50ma'] else '✗'}")
+        
+        # Debug: Check minimum score threshold
+        ep_score = 0
+        criteria_met = []
+        
+        # 1. Gap up criteria (40 points max)
+        if gap_percent >= 15:
+            ep_score += 40
+            criteria_met.append(f"Big gap: {gap_percent:.1f}%")
+        elif gap_percent >= 10:
+            ep_score += 30
+            criteria_met.append(f"Gap up: {gap_percent:.1f}%")
+        
+        # 2. Volume surge criteria (30 points max)
+        if volume_surge >= 5:
+            ep_score += 30
+            criteria_met.append(f"Huge volume: {volume_surge:.1f}x")
+        elif volume_surge >= 3:
+            ep_score += 25
+            criteria_met.append(f"Volume surge: {volume_surge:.1f}x")
+        elif volume_surge >= 2:
+            ep_score += 10
+            criteria_met.append(f"Good volume: {volume_surge:.1f}x")
+        
+        # 3. Sideways consolidation (20 points max)
+        if sideways_info["is_sideways"] and sideways_info["consolidation_days"] >= 60:
+            ep_score += 20
+            criteria_met.append(f"Sideways {sideways_info['consolidation_days']} days")
+        elif sideways_info["consolidation_days"] >= 30:
+            ep_score += 10
+            criteria_met.append(f"Some consolidation")
+        
+        # 4. Price strength (10 points max)
+        if price_strength["recent_high"]:
+            ep_score += 5
+            criteria_met.append("New highs")
+        if price_strength["price_above_50ma"]:
+            ep_score += 5
+            criteria_met.append("Above 50MA")
+        
+        print(f"\nScore Calculation:")
+        print(f"Total Score: {ep_score}/100")
+        print(f"Criteria Met: {', '.join(criteria_met)}")
+        print(f"Minimum Required Score: 30")
+        
+        # Use the detector's screen_for_ep with the flag
+        result = detector.screen_for_ep(ticker, require_sideways=require_sideways)
+        if result:
+            print("\nThis ticker qualifies as an EP!")
+        else:
+            print("\nThis ticker does NOT qualify as an EP.")
+            if gap_percent < 10.0:
+                print("Reason: Gap up less than 10%")
+            elif ep_score < 30:
+                print("Reason: Total score below minimum threshold of 30")
+            elif require_sideways and (not sideways_info["is_sideways"] or sideways_info["consolidation_days"] < 60):
+                print("Reason: Does not meet sideways consolidation requirement")
+        
+    except Exception as e:
+        print(f"Error analyzing {ticker}:")
+        print(traceback.format_exc())
 
 if __name__ == "__main__":
-    test_specific_tickers() 
+    parser = argparse.ArgumentParser(description="Test EP detector for a specific ticker.")
+    parser.add_argument("--no-sideways", action="store_true", help="Disable sideways consolidation requirement.")
+    parser.add_argument("--ticker", type=str, default="NNE", help="Ticker symbol to analyze.")
+    args = parser.parse_args()
+    
+    analyze_ticker(args.ticker, require_sideways=not args.no_sideways) 
