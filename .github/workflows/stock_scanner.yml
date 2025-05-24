@@ -2,8 +2,10 @@ name: Stock Scanner
 
 on:
   schedule:
-    # Runs at 9:00 AM UTC every day
-    - cron: '0 9 * * *'
+    # Runs at 9:00 AM ET (13:00 UTC) on weekdays
+    - cron: '0 13 * * 1-5'
+    # Runs at 10:00 PM ET (02:00 UTC next day) on weekdays
+    - cron: '0 2 * * 2-6'
   # Allows manual triggering from GitHub UI
   workflow_dispatch:
 

@@ -9,7 +9,7 @@ An automated stock scanner that detects Episodic Pivot patterns and analyzes the
 - Fetches and analyzes relevant news
 - Uses AI to generate comprehensive analysis
 - Sends reports to Discord
-- Runs automatically on a schedule
+- Runs automatically twice daily on weekdays
 
 ## GitHub Actions Setup
 
@@ -27,12 +27,15 @@ An automated stock scanner that detects Episodic Pivot patterns and analyzes the
      ```
 
 3. The workflow will automatically run:
-   - Every day at 9:00 AM UTC
+   - Every weekday at 9:00 AM ET
+   - Every weekday at 10:00 PM ET
    - You can also manually trigger it from the "Actions" tab
 
 4. To modify the schedule:
-   - Edit the cron expression in `.github/workflows/stock_scanner.yml`
-   - Current schedule: `0 9 * * *` (9:00 AM UTC daily)
+   - Edit the cron expressions in `.github/workflows/stock_scanner.yml`
+   - Current schedule:
+     - `0 13 * * 1-5` (9:00 AM ET on weekdays)
+     - `0 2 * * 2-6` (10:00 PM ET on weekdays)
 
 ## Required API Keys
 
