@@ -412,7 +412,7 @@ class EPDetector:
         current_volume = data['Volume'].iloc[-1]
         avg_volume = data['Volume'].iloc[-(lookback_days+1):-1].mean()
         
-        if avg_volume == 0:
+        if avg_volume < 100000:
             return 0.0
             
         volume_multiple = current_volume / avg_volume
