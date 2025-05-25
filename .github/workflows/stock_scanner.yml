@@ -12,6 +12,7 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    environment: 'ALPACA_API_KEY'
     
     steps:
     - uses: actions/checkout@v3
