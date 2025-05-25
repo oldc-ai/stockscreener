@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-# import yfinance as yf # Removed yfinance
+import yfinance as yf
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -11,6 +11,8 @@ from alpaca.trading.client import TradingClient
 import concurrent.futures
 from functools import lru_cache
 import time
+from ticker_utils import get_tickers
+import argparse
 
 # Initialize Alpaca clients
 API_KEY = os.getenv('ALPACA_API_KEY')
@@ -27,187 +29,140 @@ BATCH_SIZE = 100  # Number of symbols to process in each batch
 MAX_WORKERS = 4   # Number of parallel workers
 RATE_LIMIT_DELAY = 0.1  # Delay between API calls in seconds
 
-# Removed get_stock_details_from_yf function
-
-def load_tickers_from_file(filepath="all_tickers.txt"):
-    """Loads tickers from a specified file, one ticker per line."""
-    tickers = []
-    try:
-        with open(filepath, 'r') as f:
-            for line in f:
-                ticker = line.strip().upper()
-                # Keep isalpha for basic symbol validation before sending to Alpaca
-                if ticker and ticker.isalpha(): 
-                    tickers.append(ticker)
-                elif ticker: 
-                    print(f"Skipping ticker '{ticker}' from file: contains non-alphabetical characters or is invalid.")
-        print(f"Loaded {len(tickers)} valid tickers from {filepath}")
-        if not tickers and os.path.exists(filepath):
-             print(f"Warning: No valid (alphabetic) tickers found in {filepath}.")
-        return tickers
-    except FileNotFoundError:
-        print(f"Error: Ticker file {filepath} not found.")
-        return []
-    except Exception as e:
-        print(f"Error reading ticker file {filepath}: {e}")
-        return []
-
-def get_symbols_to_analyze(ticker_filepath="all_tickers.txt"):
-    """Loads tickers from file. No external enrichment."""
-    
-    symbols = load_tickers_from_file(ticker_filepath)
-    if not symbols:
-        print("No tickers to process from file.")
-        return []
-            
-    print(f"\nPrepared {len(symbols)} symbols for analysis directly from {ticker_filepath}.")
-    return symbols
+def get_symbols_to_analyze(use_cache: bool = True) -> list:
+    """
+    Get list of symbols to analyze from GitHub repository.
+    Returns a list of ticker symbols.
+    """
+    return get_tickers(use_cache=use_cache)
 
 @lru_cache(maxsize=1000)
 def get_historical_data_batch(symbols, start_date, end_date):
-    """Get historical data for a batch of symbols"""
-    request_params = StockBarsRequest(
-        symbol_or_symbols=symbols,
-        timeframe=TimeFrame.Day,
-        start=start_date,
-        end=end_date,
-        adjustment='all'  # Use adjusted prices to account for splits and dividends
-    )
+    """
+    Get historical data for a batch of symbols.
+    Uses caching to avoid repeated API calls.
+    """
     try:
-        bars = data_client.get_stock_bars(request_params)
-        time.sleep(RATE_LIMIT_DELAY)  # Respect rate limits
-        return bars.df
+        data = yf.download(symbols, start=start_date, end=end_date, group_by='ticker')
+        return data
     except Exception as e:
-        # More specific error logging for Alpaca API calls
-        if "subscription" in str(e).lower() or "forbidden" in str(e).lower() :
-            print(f"Error for batch {symbols}: Data access issue (e.g. subscription/permissions). {e}")
-        elif "not found" in str(e).lower():
-            print(f"Error for batch {symbols}: Symbols likely not found on Alpaca or no data in range. {e}")
-        else:
-            print(f"Error getting data for batch {symbols} from Alpaca: {e}")
+        print(f"Error downloading data for batch: {e}")
         return None
 
 def find_max_return(df):
-    """Find the maximum return between any two points in the period using O(n) algorithm"""
+    """
+    Find the maximum return for a given stock.
+    Returns a tuple of (max_return, start_date, end_date)
+    """
     if df is None or df.empty:
-        return 1.0, None, None, None, None
-        
-    # Sort the dataframe by date to ensure chronological order
-    df = df.sort_index()
+        return None, None, None
     
-    prices = df['close'].values
-    dates = df.index.values
+    # Calculate daily returns
+    returns = df['Adj Close'].pct_change()
     
-    min_price = float('inf')
-    min_price_date = None
-    actual_max_return_ratio = 1.0
-    start_date_for_max_return = None
-    end_date_for_max_return = None
-    start_price = None
-    end_price = None
+    # Calculate cumulative returns
+    cum_returns = (1 + returns).cumprod()
     
-    for i, (price, date) in enumerate(zip(prices, dates)):
-        if isinstance(date, tuple):
-            date = date[1]
-            
-        if price < min_price and price > 0:
-            min_price = price
-            min_price_date = date
-        
-        if min_price != float('inf') and min_price > 0:
-            if date > min_price_date:
-                current_return_ratio = price / min_price
-                if current_return_ratio > actual_max_return_ratio:
-                    actual_max_return_ratio = current_return_ratio
-                    start_date_for_max_return = min_price_date
-                    end_date_for_max_return = date
-                    start_price = min_price
-                    end_price = price
+    # Find the maximum return
+    max_return = cum_returns.max()
+    end_date = cum_returns.idxmax()
     
-    return actual_max_return_ratio, start_date_for_max_return, end_date_for_max_return, start_price, end_price
+    # Find the start date (first date with non-zero return)
+    start_date = cum_returns[cum_returns > 1].index[0] if len(cum_returns[cum_returns > 1]) > 0 else None
+    
+    return max_return, start_date, end_date
 
 def process_symbol_batch(symbols, start_date, end_date):
-    """Process a batch of symbols and return results"""
+    """
+    Process a batch of symbols and find their maximum returns.
+    """
     results = []
-    df = get_historical_data_batch(tuple(symbols), start_date, end_date)
+    data = get_historical_data_batch(tuple(symbols), start_date, end_date)
     
-    if df is not None and not df.empty:
-        for symbol in symbols:
-            symbol_data = df[df.index.get_level_values('symbol') == symbol]
-            if not symbol_data.empty:
-                max_return_ratio, return_start_date, return_end_date, start_price, end_price = find_max_return(symbol_data)
-                if max_return_ratio >= 10:
+    if data is None:
+        return results
+    
+    for symbol in symbols:
+        try:
+            if symbol in data.columns.levels[0]:
+                symbol_data = data[symbol]
+                max_return, start_date, end_date = find_max_return(symbol_data)
+                
+                if max_return is not None and max_return > 1:
                     results.append({
                         'symbol': symbol,
-                        'max_return_factor': round(max_return_ratio, 2),
-                        'start_price': round(start_price, 2) if start_price is not None else 'N/A',
-                        'end_price': round(end_price, 2) if end_price is not None else 'N/A',
-                        'return_start_date': return_start_date.strftime('%Y-%m-%d') if return_start_date is not None else 'N/A',
-                        'return_end_date': return_end_date.strftime('%Y-%m-%d') if return_end_date is not None else 'N/A',
-                        'return_period_days': (return_end_date - return_start_date).days if return_start_date is not None and return_end_date is not None else 'N/A'
+                        'max_return': max_return,
+                        'start_date': start_date,
+                        'end_date': end_date
                     })
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
     
     return results
 
 def main():
-    # Set date range (10 years ago to today)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Find stocks that have had 10x returns')
+    parser.add_argument('--years', type=int, default=10, help='Number of years to look back')
+    parser.add_argument('--min-return', type=float, default=10.0, help='Minimum return to consider (e.g., 10.0 for 10x)')
+    parser.add_argument('--batch-size', type=int, default=100, help='Number of symbols to process in each batch')
+    parser.add_argument('--max-workers', type=int, default=4, help='Number of parallel workers')
+    parser.add_argument('--no-cache', action='store_true', help='Disable ticker cache and fetch fresh from GitHub')
+    args = parser.parse_args()
+    
+    # Set date range
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365*10)
+    start_date = end_date - timedelta(days=args.years * 365)
     
-    print("Loading symbols from file...")
-    symbols_to_process = get_symbols_to_analyze("all_tickers.txt") 
-    
-    if not symbols_to_process:
-        print("No symbols to analyze from file. Exiting...")
-        return
+    # Get symbols to analyze
+    symbols = get_symbols_to_analyze(use_cache=not args.no_cache)
+    print(f"Analyzing {len(symbols)} symbols from {start_date.date()} to {end_date.date()}")
     
     # Split symbols into batches
-    symbol_batches = [symbols_to_process[i:i + BATCH_SIZE] 
-                     for i in range(0, len(symbols_to_process), BATCH_SIZE)]
+    batches = [symbols[i:i + args.batch_size] for i in range(0, len(symbols), args.batch_size)]
     
-    ten_x_stocks = []
-    total_batches = len(symbol_batches)
+    all_results = []
+    processed_count = 0
     
-    print(f"\nProcessing {len(symbols_to_process)} symbols in {total_batches} batches...")
-    
-    # Process batches in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_batch = {
-            executor.submit(process_symbol_batch, batch, start_date, end_date): i 
-            for i, batch in enumerate(symbol_batches)
-        }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        # Submit all batches
+        future_to_batch = {executor.submit(process_symbol_batch, batch, start_date, end_date): batch for batch in batches}
         
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_batch)):
-            batch_num = future_to_batch[future]
+        for future in concurrent.futures.as_completed(future_to_batch):
+            batch = future_to_batch[future]
+            processed_count += len(batch)
+            
             try:
                 batch_results = future.result()
-                ten_x_stocks.extend(batch_results)
-                print(f"Completed batch {batch_num + 1}/{total_batches} - Found {len(batch_results)} 10x stocks")
+                all_results.extend(batch_results)
+                
+                # Progress reporting
+                progress_pct = (processed_count / len(symbols)) * 100
+                print(f"Progress: {processed_count:4}/{len(symbols)} ({progress_pct:5.1f}%) | "
+                      f"Found {len(batch_results)} candidates in this batch | "
+                      f"Total candidates: {len(all_results)}")
+                
             except Exception as e:
-                print(f"Error processing batch {batch_num + 1}: {e}")
+                print(f"Batch failed: {str(e)[:50]}")
     
-    # Convert to DataFrame and sort by max return
-    if ten_x_stocks:
-        df = pd.DataFrame(ten_x_stocks)
-        # Update expected columns
-        expected_cols = ['symbol', 'max_return_factor', 'start_price', 'end_price',
-                        'return_start_date', 'return_end_date', 'return_period_days']
+    # Filter and sort results
+    results_df = pd.DataFrame(all_results)
+    if not results_df.empty:
+        results_df = results_df[results_df['max_return'] >= args.min_return]
+        results_df = results_df.sort_values('max_return', ascending=False)
         
-        # Ensure all expected columns are present
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = None 
-        df = df[expected_cols] 
-        df = df.sort_values('max_return_factor', ascending=False)
+        # Save results
+        output_file = f"stock_returns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        results_df.to_csv(output_file, index=False)
+        print(f"\nResults saved to {output_file}")
         
-        print("\nStocks from file that achieved 10x return (or more) in the past 10 years:")
-        print(df.to_string(index=False))
-        
-        # Save to CSV
-        df.to_csv('ten_x_stocks_from_file_alpaca_only.csv', index=False)
-        print("\nResults have been saved to 'ten_x_stocks_from_file_alpaca_only.csv'")
+        # Print summary
+        print(f"\nFound {len(results_df)} stocks with {args.min_return}x+ returns")
+        print("\nTop 10 stocks by return:")
+        for _, row in results_df.head(10).iterrows():
+            print(f"{row['symbol']:6} - {row['max_return']:.1f}x from {row['start_date'].date()} to {row['end_date'].date()}")
     else:
-        print("No stocks from the provided list met the 10x return criteria.")
+        print("\nNo stocks found meeting the criteria.")
 
 if __name__ == "__main__":
     main() 

@@ -24,6 +24,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 import yfinance as yf
+from ticker_utils import get_tickers
 
 warnings.filterwarnings('ignore')
 
@@ -34,6 +35,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='EP Detector with industry and market cap filtering')
     parser.add_argument('--exclude-industry', nargs='+', help='List of industries to exclude (e.g., "Technology" "Healthcare")')
     parser.add_argument('--exclude-market-cap-below', type=float, help='Exclude stocks with market cap below this value (in millions)')
+    parser.add_argument('--no-cache', action='store_true', help='Disable ticker cache and fetch fresh from GitHub')
     return parser.parse_args()
 
 class EPDetector:
@@ -607,10 +609,11 @@ class EPDetector:
         
         return None
     
-    def scan_all_tickers(self, ticker_file: str = 'all_tickers.txt', max_tickers: Optional[int] = None, 
-                        batch_size: int = 20, max_workers: int = 4) -> List[Dict]:
+    def scan_all_tickers(self, max_tickers: Optional[int] = None, 
+                        batch_size: int = 20, max_workers: int = 4,
+                        use_cache: bool = True) -> List[Dict]:
         """Scan all tickers for EP setups using batching and parallel processing"""
-        tickers = self.load_tickers(ticker_file)
+        tickers = get_tickers(use_cache=use_cache)
         
         if max_tickers:
             tickers = tickers[:max_tickers]
@@ -719,19 +722,13 @@ def main():
         min_market_cap=args.exclude_market_cap_below
     )
     
-    # Load tickers and scan
-    tickers = detector.load_tickers()
-    if not tickers:
-        print("No tickers loaded. Exiting.")
-        return
-    
-    print(f"Starting EP scan with {len(tickers)} tickers...")
+    print(f"Starting EP scan...")
     if args.exclude_industry:
         print(f"Excluding industries: {', '.join(args.exclude_industry)}")
     if args.exclude_market_cap_below:
         print(f"Excluding stocks with market cap below ${args.exclude_market_cap_below}M")
     
-    results = detector.scan_all_tickers()
+    results = detector.scan_all_tickers(use_cache=not args.no_cache)
     
     if results:
         print(f"\nFound {len(results)} potential EP setups!")
