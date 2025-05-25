@@ -194,7 +194,7 @@ class EPDetector:
     def get_batch_stock_data(self, tickers: List[str], days: int = 365) -> Dict[str, pd.DataFrame]:
         """Get stock data for multiple tickers in a single API call"""
         try:
-            end_date = datetime.now()
+            end_date = datetime.now() - timedelta(minutes=16)
             start_date = end_date - timedelta(days=days)
             
             request_params = StockBarsRequest(
