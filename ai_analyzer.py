@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import json
+import yfinance as yf
 
 # Load environment variables
 load_dotenv()
@@ -116,9 +117,35 @@ def fetch_news_for_ticker(ticker, limit=3):
         print(f"Error fetching news for {ticker}: {e}")
         return [f"Error fetching news: {e}"]
 
+def get_market_cap(ticker):
+    """Get market cap for a ticker using yfinance."""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        market_cap = info.get('marketCap', 0)
+        return market_cap
+    except Exception as e:
+        print(f"Error fetching market cap for {ticker}: {e}")
+        return 0
+
+def format_market_cap(market_cap):
+    """Format market cap in human readable format (e.g., 1.2B, 500M)."""
+    if market_cap >= 1_000_000_000:  # Billion
+        return f"{market_cap/1_000_000_000:.1f}B"
+    elif market_cap >= 1_000_000:  # Million
+        return f"{market_cap/1_000_000:.1f}M"
+    else:
+        return f"{market_cap:,.0f}"
+
 def analyze_tickers_with_gemini(tickers_data, news_dict):
-    """Analyze tickers using Gemini AI, including news."""
+    """Analyze tickers using Gemini AI, including news and market cap."""
     model = genai.GenerativeModel('models/gemini-2.5-flash-preview-05-20')
+    
+    # Get market cap for each ticker
+    market_caps = {ticker: get_market_cap(ticker) for ticker in tickers_data}
+    
+    # Sort tickers by market cap (descending)
+    sorted_tickers = sorted(tickers_data.keys(), key=lambda x: market_caps[x], reverse=True)
     
     # Prepare the prompt
     prompt = """Analyze these stock tickers that showed gap up patterns. For each ticker, use both the technical data and the latest news headlines to explain:
@@ -127,11 +154,13 @@ def analyze_tickers_with_gemini(tickers_data, news_dict):
 
 Data to analyze:
 """
-    for ticker, data in tickers_data.items():
-        prompt += f"\nTicker: {ticker}\nTechnical Data: {data}\nNews Headlines:\n"
+    for ticker in sorted_tickers:
+        data = tickers_data[ticker]
+        market_cap = format_market_cap(market_caps[ticker])
+        prompt += f"\nTicker: {ticker} (Market Cap: {market_cap})\nTechnical Data: {data}\nNews Headlines:\n"
         for news in news_dict.get(ticker, []):
             prompt += f"  {news}\n"
-    prompt += "\nFormat the response as a brief report with bullet points for each ticker."
+    prompt += "\nFormat the response as a brief report with bullet points for each ticker, maintaining the order by market cap (largest to smallest)."
     
     # Generate analysis
     response = model.generate_content(prompt)
