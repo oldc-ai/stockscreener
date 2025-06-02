@@ -160,7 +160,7 @@ Data to analyze:
         prompt += f"\nTicker: {ticker} (Market Cap: {market_cap})\nTechnical Data: {data}\nNews Headlines:\n"
         for news in news_dict.get(ticker, []):
             prompt += f"  {news}\n"
-    prompt += "\nFormat the response as a brief report with bullet points for each ticker, maintaining the order by market cap (largest to smallest)."
+    prompt += "\nFormat the response as a brief report with bullet points for each ticker, maintaining the order by market cap (largest to smallest), also include the market cap right after the ticker name."
     
     # Generate analysis
     response = model.generate_content(prompt)
