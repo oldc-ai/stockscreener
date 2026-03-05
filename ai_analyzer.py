@@ -139,7 +139,7 @@ def format_market_cap(market_cap):
 
 def analyze_tickers_with_gemini(tickers_data, news_dict):
     """Analyze tickers using Gemini AI, including news and market cap."""
-    model = genai.GenerativeModel('models/gemini-2.5-flash-preview-05-20')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
     
     # Get market cap for each ticker
     market_caps = {ticker: get_market_cap(ticker) for ticker in tickers_data}
