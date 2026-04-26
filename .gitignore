@@ -1,17 +1,7 @@
 # Environment variables
 .env
-watchlist.csv
-tickers_cache.txt
-tickers_cache_timestamp.txt
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-.deps/
-.venv/
-
-# Generated outputs
-analysis_outputs/
-analysis_outputs_smoke/
-daily_reports/
