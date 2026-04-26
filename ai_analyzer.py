@@ -148,19 +148,26 @@ def analyze_tickers_with_gemini(tickers_data, news_dict):
     sorted_tickers = sorted(tickers_data.keys(), key=lambda x: market_caps[x], reverse=True)
     
     # Prepare the prompt
-    prompt = """Analyze these stock tickers that showed gap up patterns. For each ticker, use both the technical data and the latest news headlines to explain:
-1. What this stock does and why the gap up likely occurred (within 5 sentences, referencing news if relevant)
-2. Technical strength assessment (1 sentence)
+    prompt = """You are a stock scanner alert bot. For each ticker below, write ONE single line in this exact format:
 
-Data to analyze:
+• TICKER (MarketCap) Gap: X% | Vol: Xx | Score: XX — [one sentence: what the company does + why it gapped, citing news if available]
+
+Rules:
+- Strictly one line per ticker. No multi-line, no sub-bullets, no extra commentary.
+- Keep the sentence under 20 words.
+- Order by market cap descending.
+- If no clear news catalyst, say "no clear catalyst" at the end.
+
+Data:
 """
     for ticker in sorted_tickers:
         data = tickers_data[ticker]
         market_cap = format_market_cap(market_caps[ticker])
-        prompt += f"\nTicker: {ticker} (Market Cap: {market_cap})\nTechnical Data: {data}\nNews Headlines:\n"
-        for news in news_dict.get(ticker, []):
-            prompt += f"  {news}\n"
-    prompt += "\nFormat the response as a brief report with bullet points for each ticker, maintaining the order by market cap (largest to smallest), also include the market cap right after the ticker name."
+        gap = data.get('gap_percent', 'N/A')
+        vol = data.get('volume_surge', 'N/A')
+        score = data.get('ep_score', 'N/A')
+        news_summary = "; ".join(news_dict.get(ticker, [])[:2])
+        prompt += f"\n{ticker} | MarketCap: {market_cap} | Gap: {gap:.1f}% | Vol: {vol:.1f}x | Score: {score} | News: {news_summary}"
     
     # Generate analysis
     response = model.generate_content(prompt)

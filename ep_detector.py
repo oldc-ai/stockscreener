@@ -39,7 +39,7 @@ def parse_args():
     return parser.parse_args()
 
 class EPDetector:
-    def __init__(self, api_key: str = None, secret_key: str = None, exclude_industries: List[str] = None, min_market_cap: float = None):
+    def __init__(self, api_key: str = None, secret_key: str = None, exclude_industries: List[str] = None, min_market_cap: float = 300.0):
         """
         Initialize EP Detector with Alpaca credentials
         If no credentials provided, will look for environment variables
@@ -273,22 +273,27 @@ class EPDetector:
         current_volume = data['Volume'].iloc[-1]
         avg_volume_20d = data['Volume'].iloc[-21:-1].mean() if len(data) > 20 else 0
         
-        # Filter out penny stocks (price < $1)
-        if current_price < 1.0:
+        # Filter out low-priced stocks (price < $5)
+        if current_price < 2.0:
             return None
-        
+
+        # Filter out illiquid stocks by dollar volume (avg daily dollar volume < $2M)
+        avg_dollar_volume = avg_volume_20d * current_price
+        if avg_dollar_volume < 2_000_000:
+            return None
+
         # Price change metrics
         price_1d = ((current_price - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100 if len(data) > 1 else 0
         price_5d = ((current_price - data['Close'].iloc[-6]) / data['Close'].iloc[-6]) * 100 if len(data) > 5 else 0
-        
+
         # HARD REQUIREMENT: EP must have 10%+ gap up (Qullamaggie's definition)
         if gap_percent < 10.0:
             return None
-        
+
         # EP Technical Scoring System (100 points max)
         ep_score = 0
         criteria_met = []
-        
+
         # 1. Gap up criteria (most important - 40 points max)
         # Note: All candidates already have 10%+ gap due to hard requirement above
         if gap_percent >= 15:
@@ -297,18 +302,15 @@ class EPDetector:
         elif gap_percent >= 10:
             ep_score += 30
             criteria_met.append(f"Gap up: {gap_percent:.1f}%")
-        
-        # 2. Volume surge criteria (30 points max)
+
+        # 2. Volume surge criteria (30 points max) — 2x no longer scores
         if volume_surge >= 5:
             ep_score += 30
             criteria_met.append(f"Huge volume: {volume_surge:.1f}x")
         elif volume_surge >= 3:
             ep_score += 25
             criteria_met.append(f"Volume surge: {volume_surge:.1f}x")
-        elif volume_surge >= 2:
-            ep_score += 10
-            criteria_met.append(f"Good volume: {volume_surge:.1f}x")
-        
+
         # 3. Sideways consolidation (20 points max)
         if sideways_info["is_sideways"] and sideways_info["consolidation_days"] >= 60:
             ep_score += 20
@@ -316,7 +318,7 @@ class EPDetector:
         elif sideways_info["consolidation_days"] >= 30:
             ep_score += 10
             criteria_met.append(f"Some consolidation")
-        
+
         # 4. Price strength (10 points max)
         if price_strength["recent_high"]:
             ep_score += 5
@@ -324,10 +326,10 @@ class EPDetector:
         if price_strength["price_above_50ma"]:
             ep_score += 5
             criteria_met.append("Above 50MA")
-        
-        # Since we already require 10%+ gap, lower the minimum score threshold
-        min_score_threshold = 30  # At least gap (30) + some additional criteria
-        
+
+        # Raised threshold: must have gap + meaningful volume (gap 30 + vol 25 = 55 minimum)
+        min_score_threshold = 40
+
         if ep_score >= min_score_threshold:
             # Only check fundamentals if it's a valid EP setup
             meets_fundamentals, fundamental_reason = self.check_fundamentals(ticker)
@@ -414,7 +416,7 @@ class EPDetector:
         current_volume = data['Volume'].iloc[-1]
         avg_volume = data['Volume'].iloc[-(lookback_days+1):-1].mean()
         
-        if avg_volume < 100000:
+        if avg_volume < 500000:
             return 0.0
             
         volume_multiple = current_volume / avg_volume
@@ -521,22 +523,27 @@ class EPDetector:
         current_volume = data['Volume'].iloc[-1]
         avg_volume_20d = data['Volume'].iloc[-21:-1].mean() if len(data) > 20 else 0
         
-        # Filter out penny stocks (price < $1)
-        if current_price < 1.0:
+        # Filter out low-priced stocks (price < $5)
+        if current_price < 2.0:
             return None
-        
+
+        # Filter out illiquid stocks by dollar volume (avg daily dollar volume < $2M)
+        avg_dollar_volume = avg_volume_20d * current_price
+        if avg_dollar_volume < 2_000_000:
+            return None
+
         # Price change metrics
         price_1d = ((current_price - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100 if len(data) > 1 else 0
         price_5d = ((current_price - data['Close'].iloc[-6]) / data['Close'].iloc[-6]) * 100 if len(data) > 5 else 0
-        
+
         # HARD REQUIREMENT: EP must have 10%+ gap up (Qullamaggie's definition)
         if gap_percent < 10.0:
             return None
-        
+
         # EP Technical Scoring System (100 points max)
         ep_score = 0
         criteria_met = []
-        
+
         # 1. Gap up criteria (most important - 40 points max)
         # Note: All candidates already have 10%+ gap due to hard requirement above
         if gap_percent >= 15:
@@ -545,18 +552,15 @@ class EPDetector:
         elif gap_percent >= 10:
             ep_score += 30
             criteria_met.append(f"Gap up: {gap_percent:.1f}%")
-        
-        # 2. Volume surge criteria (30 points max)
+
+        # 2. Volume surge criteria (30 points max) — 2x no longer scores
         if volume_surge >= 5:
             ep_score += 30
             criteria_met.append(f"Huge volume: {volume_surge:.1f}x")
         elif volume_surge >= 3:
             ep_score += 25
             criteria_met.append(f"Volume surge: {volume_surge:.1f}x")
-        elif volume_surge >= 2:
-            ep_score += 10
-            criteria_met.append(f"Good volume: {volume_surge:.1f}x")
-        
+
         # 3. Sideways consolidation (20 points max)
         if sideways_info["is_sideways"] and sideways_info["consolidation_days"] >= 60:
             ep_score += 20
@@ -564,7 +568,7 @@ class EPDetector:
         elif sideways_info["consolidation_days"] >= 30:
             ep_score += 10
             criteria_met.append(f"Some consolidation")
-        
+
         # 4. Price strength (10 points max)
         if price_strength["recent_high"]:
             ep_score += 5
@@ -572,26 +576,26 @@ class EPDetector:
         if price_strength["price_above_50ma"]:
             ep_score += 5
             criteria_met.append("Above 50MA")
-        
-        # Since we already require 10%+ gap, lower the minimum score threshold
-        min_score_threshold = 30  # At least gap (30) + some additional criteria
-        
+
+        # Raised threshold: must have gap + meaningful volume (gap 30 + vol 25 = 55 minimum)
+        min_score_threshold = 40
+
         if ep_score >= min_score_threshold:
             return {
                 "ticker": ticker,
                 "ep_score": ep_score,
-                
+
                 # Price metrics
                 "current_price": current_price,
                 "gap_percent": gap_percent,
                 "price_1d": price_1d,
                 "price_5d": price_5d,
-                
-                # Volume metrics  
+
+                # Volume metrics
                 "volume_surge": volume_surge,
                 "current_volume": current_volume,
                 "avg_volume_20d": avg_volume_20d,
-                
+
                 # Technical indicators
                 "rsi": price_strength["rsi"],
                 "above_50ma": price_strength["price_above_50ma"],
